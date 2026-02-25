@@ -273,7 +273,11 @@ export default function DatePlannerApp() {
         }],
       }),
     });
-    if (!response.ok) throw new Error(`API ${response.status}`);
+    if (!response.ok) {
+      let errMsg = `API ${response.status}`;
+      try { const errData = await response.json(); errMsg = errData.error?.message || errData.error || errMsg; } catch {}
+      throw new Error(errMsg);
+    }
     const data = await response.json();
     if (data.error) throw new Error(data.error.message);
 
@@ -284,8 +288,31 @@ export default function DatePlannerApp() {
     fullText = fullText.trim();
     if (!fullText) throw new Error("Empty");
 
-    const cleaned = fullText.replace(/```json/gi, "").replace(/```/g, "").trim();
-    try { const d = JSON.parse(cleaned); if (d.stops) return d; } catch {}
+    // Strip Anthropic citation tags, web search artifacts, and other XML noise
+    const stripCitations = (str) => str
+      .replace(/<\/?antml:cite[^>]*>/gi, "")
+      .replace(/<\/?cite[^>]*>/gi, "")
+      .replace(/<\/?source[^>]*>/gi, "")
+      .replace(/<\/?search_result[^>]*>/gi, "")
+      .replace(/<\/?document[^>]*>/gi, "")
+      .replace(/cite index="[^"]*">/gi, "")
+      .replace(/<[a-z_]+:[a-z_]+[^>]*>/gi, "")
+      .replace(/<\/[a-z_]+:[a-z_]+>/gi, "");
+
+    // Deep-clean all string values in a parsed object
+    const deepClean = (obj) => {
+      if (typeof obj === "string") return stripCitations(obj);
+      if (Array.isArray(obj)) return obj.map(deepClean);
+      if (obj && typeof obj === "object") {
+        const out = {};
+        for (const [k, v] of Object.entries(obj)) out[k] = deepClean(v);
+        return out;
+      }
+      return obj;
+    };
+
+    const cleaned = stripCitations(fullText).replace(/```json/gi, "").replace(/```/g, "").trim();
+    try { const d = JSON.parse(cleaned); if (d.stops) return deepClean(d); } catch {}
 
     // Extract all JSON objects, find the one with "stops"
     const candidates = [];
@@ -309,8 +336,8 @@ export default function DatePlannerApp() {
     candidates.sort((a, b) => b.length - a.length);
     for (const c of candidates) {
       if (!c.includes("stops")) continue;
-      try { const o = JSON.parse(c); if (o.stops?.length > 0) return o; } catch {}
-      try { const o = JSON.parse(c.replace(/[\x00-\x1F\x7F]/g, " ").replace(/,\s*}/g, "}").replace(/,\s*]/g, "]")); if (o.stops?.length > 0) return o; } catch {}
+      try { const o = JSON.parse(c); if (o.stops?.length > 0) return deepClean(o); } catch {}
+      try { const o = JSON.parse(c.replace(/[\x00-\x1F\x7F]/g, " ").replace(/,\s*}/g, "}").replace(/,\s*]/g, "]")); if (o.stops?.length > 0) return deepClean(o); } catch {}
     }
 
     // Regex fallback
@@ -327,7 +354,7 @@ export default function DatePlannerApp() {
       }
       if (stops.length >= 2) {
         const g = (key) => { const x = cleaned.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`)); return x?.[1] || ""; };
-        return { title: g("title") || `Your ${city.name} Date Plan`, summary: g("summary") || "A curated date across the city's best.", stops, total_budget: g("total_budget"), what_to_wear: g("what_to_wear"), playlist_mood: g("playlist_mood") };
+        return deepClean({ title: g("title") || `Your ${city.name} Date Plan`, summary: g("summary") || "A curated date across the city's best.", stops, total_budget: g("total_budget"), what_to_wear: g("what_to_wear"), playlist_mood: g("playlist_mood") });
       }
     }
     throw new Error("Parse failed");
@@ -336,8 +363,9 @@ export default function DatePlannerApp() {
   const doSearch = useCallback(async (vibe, round, excludePlaces = []) => {
     setStage("loading"); setError(null);
     const prompt = buildPrompt(vibe.id, round, excludePlaces);
-    for (let attempt = 0; attempt <= 2; attempt++) {
+    for (let attempt = 0; attempt <= 1; attempt++) {
       try {
+        if (attempt > 0) await new Promise(r => setTimeout(r, 3000));
         const parsed = await callAPI(prompt);
         if (!parsed?.stops?.length) throw new Error("No stops");
         setPlan(parsed);
@@ -346,7 +374,12 @@ export default function DatePlannerApp() {
         setStage("result");
         return;
       } catch (err) {
-        if (attempt === 2) { setError(err.message); setStage("error"); }
+        if (err.message?.includes("429") || err.message?.toLowerCase()?.includes("rate")) {
+          setError("Rate limited — wait 30 seconds and tap Try Again. Your credits are fine, Anthropic just limits request speed on new accounts.");
+          setStage("error");
+          return;
+        }
+        if (attempt === 1) { setError(err.message); setStage("error"); }
       }
     }
   }, [buildPrompt, callAPI]);
