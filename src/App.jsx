@@ -259,9 +259,9 @@ export default function DatePlannerApp() {
   }, [city]);
 
   const callAPI = useCallback(async (prompt) => {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("/api/search", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "anthropic-dangerous-direct-browser-access": "true" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 3000,
